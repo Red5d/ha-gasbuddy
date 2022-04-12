@@ -13,6 +13,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     }
 )
 
+import logging
+_LOGGER = logging.getLogger(__name__) 
+
 import requests
 from datetime import datetime, timedelta
 
@@ -24,14 +27,17 @@ def setup_platform(hass: core.HomeAssistant, config: dict, add_entities, discove
     r = requests.post("https://www.gasbuddy.com/gaspricemap/station", data={'id': config[CONF_STATIONID], 'fuelTypeId': '1'})
 
     # Get dictionary to convert fuel types to names
-    fuels = []
+    fuels = {}
     for fuel in r.json()['station']['APIFuel']:
-        fuels.append({'type': fuel['Id'], 'name': fuel['DisplayName']})
+        if fuel['Available']:
+            fuels[str(fuel['Id'])] = fuel['DisplayName']
 
     sensors = []
     for fuel in r.json()['station']['Fuels']:
-        name = [x['name'] for x in fuels if x['type'] == fuel['FuelType']][0]
-        sensors.append(GasBuddySensor(str(config[CONF_STATIONID])+"_"+name.lower(), r.json()['station']['Name']+" - "+str(config[CONF_STATIONID])+" - "+name, config[CONF_STATIONID], fuel['FuelType']))
+        if str(fuel['FuelType']) in fuels.keys():
+            name = fuels[str(fuel['FuelType'])]
+            _LOGGER.debug(f"Setting up GasBuddySensor {r.json()['station']['Name']+' - '+str(config[CONF_STATIONID])}")
+            sensors.append(GasBuddySensor(str(config[CONF_STATIONID])+"_"+name.lower(), r.json()['station']['Name']+" - "+str(config[CONF_STATIONID])+" - "+name, config[CONF_STATIONID], fuel['FuelType']))
 
     add_entities(sensors, True)
 
@@ -74,7 +80,14 @@ class GasBuddySensor(Entity):
         if r.ok:
             for fuel in r.json()['station']['Fuels']:
                 if fuel['FuelType'] == self.fueltype:
-                    self._state = fuel['CreditPrice']['Amount']
+                    try:
+                        self._state = fuel['CreditPrice']['Amount']
+                        self._available = True
+                    except:
+                        _LOGGER.warning(f"No price found for fuel type {fuel['FuelType']}")
+                        self._state = -1
+                        self._available = False
+
                     self.attrs = {
                         'name': r.json()['station']['Name'],
                         'address': r.json()['station']['Address'],
@@ -83,6 +96,13 @@ class GasBuddySensor(Entity):
                         'zipcode': r.json()['station']['ZipCode'],
                         'lat': r.json()['station']['Lat'],
                         'lng': r.json()['station']['Lng'],
-                        'last_updated': datetime.fromtimestamp(float(fuel['CreditPrice']['TimePosted'].split('(')[1].split(')')[0]) / 1000)
                     }
+
+                    try:
+                        self.attrs['last_updated'] = datetime.fromtimestamp(float(fuel['CreditPrice']['TimePosted'].split('(')[1].split(')')[0]) / 1000)
+                    except:
+                        _LOGGER.warning(f"No update time found for fuel type {fuel['FuelType']}")
+                        self.attrs['last_updated'] = -1
+                        if self._state == -1:
+                            self._available = False
 
